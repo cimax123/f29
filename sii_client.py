@@ -1,5 +1,4 @@
 import requests
-import json
 from datetime import datetime
 
 class SIIClient:
@@ -17,7 +16,6 @@ class SIIClient:
         })
 
     def autenticar(self) -> bool:
-        """Autenticación en SII obteniendo la cookie TOKEN."""
         login_url = "https://zeusr.sii.cl/cgi_AUT2000/CAutInicio.cgi"
         payload = {
             "rut": self.rut_cuerpo,
@@ -33,11 +31,9 @@ class SIIClient:
             return False
 
     def _extraer_lista(self, resp_json) -> list:
-        """Busca recursivamente listas de documentos dentro del JSON del SII."""
         if isinstance(resp_json, list):
             return resp_json
         if isinstance(resp_json, dict):
-            # Probar llaves comunes del backend del SII
             data = resp_json.get("data")
             if isinstance(data, list):
                 return data
@@ -49,9 +45,6 @@ class SIIClient:
         return []
 
     def obtener_resumen_rcv(self, periodo: str = None, operacion: str = "VENTA") -> tuple[float, float, list]:
-        """
-        Retorna (monto_neto, monto_iva, raw_data_list)
-        """
         if not periodo:
             periodo = datetime.now().strftime("%Y%m")
 
@@ -61,7 +54,6 @@ class SIIClient:
             "Referer": "https://www4.sii.cl/consdcvinternetui/"
         }
         
-        # El SII acepta tanto el namespace clásico como el de DIII
         data = {
             "metaData": {
                 "namespace": "cl.sii.sdi.lob.diii.consdcv.data.api.interfaces.FacadeService/getResumen",
@@ -80,7 +72,6 @@ class SIIClient:
         try:
             resp = self.session.post(url, headers=headers, json=data, timeout=15)
             if resp.status_code != 200:
-                # Fallback al namespace secundario si el primero devuelve error
                 data["metaData"]["namespace"] = "cl.sii.sdi.lob.dcv.cons.data.facade.interfaces.CommonDataFacadeService/getResumen"
                 resp = self.session.post(url, headers=headers, json=data, timeout=15)
 
@@ -92,26 +83,14 @@ class SIIClient:
                 
                 for doc in raw_list:
                     if isinstance(doc, dict):
-                        # Mapeo de IVA (incluyendo crédito recuperable en compras)
-                        iva_val = (
-                            doc.get("totalMntIvaRecuperable") or
-                            doc.get("totalMntIva") or
-                            doc.get("totalIvaRecuperable") or
-                            doc.get("totalIva") or
-                            doc.get("mntIva") or
-                            doc.get("iva") or 0
-                        )
-                        # Mapeo de Neto
-                        neto_val = (
-                            doc.get("totalMntNeto") or
-                            doc.get("totalNeto") or
-                            doc.get("mntNeto") or
-                            doc.get("neto") or 0
-                        )
+                        # Claves exactas identificadas del SII
+                        iva_val = doc.get("rsmnMntIVA") or doc.get("totalMntIva") or doc.get("totalIva") or doc.get("mntIva") or 0
+                        neto_val = doc.get("rsmnMntNeto") or doc.get("totalMntNeto") or doc.get("totalNeto") or doc.get("mntNeto") or 0
                         
-                        # Tipo de DTE (Notas de Crédito tipo 61 restan)
-                        tipo_dte = str(doc.get("tipoDoc") or doc.get("tipoDte") or "")
-                        factor = -1.0 if tipo_dte in ["61", "Nota de Credito", "NC"] else 1.0
+                        tipo_dte = doc.get("rsmnTipoDocInteger") or doc.get("tipoDoc") or doc.get("tipoDte") or 0
+                        
+                        # 61 = Nota de Crédito (resta)
+                        factor = -1.0 if str(tipo_dte) in ["61", "Nota de Credito"] else 1.0
                         
                         total_iva += float(iva_val) * factor
                         total_neto += float(neto_val) * factor
@@ -122,9 +101,6 @@ class SIIClient:
             return 0.0, 0.0, []
 
     def obtener_resumen_honorarios(self, periodo: str = None) -> tuple[float, int, dict]:
-        """
-        Retorna (total_retencion, cantidad_docs, raw_dict)
-        """
         if not periodo:
             periodo = datetime.now().strftime("%Y%m")
 
