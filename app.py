@@ -3,107 +3,105 @@ import pandas as pd
 from datetime import datetime
 from sii_client import SIIClient
 
-st.set_page_config(page_title="Dashboard F29 en Vivo", layout="wide", page_icon="📈")
+st.set_page_config(page_title="Dashboard F29 - SII", layout="wide", page_icon="📈")
 
 st.title("🏛️ Provisión F29 en Vivo (SII Chile)")
 
-# 1. Validación temprana de Secrets
-rut_secret = st.secrets.get("SII_RUT", "").strip()
-clave_secret = st.secrets.get("SII_CLAVE", "").strip()
-tasa_ppm = float(st.secrets.get("TASA_PPM", 0.015))
+RUT = st.secrets.get("SII_RUT", "").strip()
+CLAVE = st.secrets.get("SII_CLAVE", "").strip()
+TASA_PPM = float(st.secrets.get("TASA_PPM", 0.015))
 
-if not rut_secret or not clave_secret:
-    st.warning("⚠️ **Faltan las credenciales en Streamlit Cloud.**")
-    st.info("""
-    Para configurarlas:
-    1. Ve a la esquina inferior derecha: **Manage app** > **Settings** > **Secrets**.
-    2. Agrega las claves `SII_RUT`, `SII_CLAVE` y `TASA_PPM`.
-    """)
+if not RUT or not CLAVE:
+    st.warning("⚠️ Debes configurar `SII_RUT` y `SII_CLAVE` en Settings > Secrets de Streamlit Cloud.")
     st.stop()
 
-st.caption(f"RUT Contribuyente: **{rut_secret}** | Periodo: **{datetime.now().strftime('%m/%Y')}** | Actualización horaria")
+# Selector de periodo (por defecto mes actual)
+col_sel1, col_sel2 = st.columns([1, 3])
+with col_sel1:
+    anio_actual = datetime.now().year
+    mes_actual = datetime.now().month
+    
+    opciones_periodo = []
+    # Generar últimos 6 meses para testing
+    for m in range(mes_actual, max(0, mes_actual - 6), -1):
+        opciones_periodo.append(f"{anio_actual}{m:02d}")
+        
+    periodo_seleccionado = st.selectbox("Seleccionar Periodo Tributario (AAAAMM):", opciones_periodo, index=0)
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def consultar_impuestos_sii(rut, clave, ppm_rate):
+st.caption(f"RUT Contribuyente: **{RUT}** | Periodo: **{periodo_seleccionado}**")
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cargar_datos_f29(rut, clave, periodo, tasa_ppm):
     client = SIIClient(rut=rut, clave=clave)
-    
     if not client.autenticar():
-        return None, "Error de autenticación: el SII rechazó el RUT o la Clave Tributaria, o bloqueó la conexión desde el servidor."
+        return None, "Error de autenticación con el SII. Verifica tu RUT y Clave Tributaria."
     
-    periodo_actual = datetime.now().strftime("%Y%m")
+    # Consultas
+    neto_ventas, debito_iva, raw_ventas = client.obtener_resumen_rcv(periodo=periodo, operacion="VENTA")
+    _, credito_iva, raw_compras = client.obtener_resumen_rcv(periodo=periodo, operacion="COMPRA")
+    ret_honorarios, cant_bhe, raw_bhe = client.obtener_resumen_honorarios(periodo=periodo)
     
-    # RCV Ventas y Compras
-    resumen_ventas = client.obtener_resumen_rcv(periodo=periodo_actual, operacion="VENTA") or []
-    resumen_compras = client.obtener_resumen_rcv(periodo=periodo_actual, operacion="COMPRA") or []
-    
-    debito_fiscal = 0.0
-    ventas_netas = 0.0
-    if isinstance(resumen_ventas, list):
-        for doc in resumen_ventas:
-            if isinstance(doc, dict):
-                debito_fiscal += float(doc.get("totalIva", 0) or 0)
-                ventas_netas += float(doc.get("totalMntNeto", 0) or 0)
-        
-    credito_fiscal = 0.0
-    if isinstance(resumen_compras, list):
-        for doc in resumen_compras:
-            if isinstance(doc, dict):
-                iva_rec = doc.get("totalIvaRecuperable")
-                if iva_rec is None:
-                    iva_rec = doc.get("totalIva", 0)
-                credito_fiscal += float(iva_rec or 0)
-        
-    iva_neto = max(0.0, debito_fiscal - credito_fiscal)
-    remanente = max(0.0, credito_fiscal - debito_fiscal)
-    ppm_proyectado = ventas_netas * ppm_rate
-
-    # Boletas de Honorarios Recibidas
-    bhe_data = client.obtener_resumen_honorarios_recibidas(periodo=periodo_actual) or {}
-    total_retencion = float(bhe_data.get("totalMntRetencion", 0) or 0) if isinstance(bhe_data, dict) else 0.0
-    cantidad_bhe = int(bhe_data.get("totalDocumentos", 0) or 0) if isinstance(bhe_data, dict) else 0
-
-    total_f29 = iva_neto + ppm_proyectado + total_retencion
+    iva_neto = max(0.0, debito_iva - credito_iva)
+    remanente = max(0.0, credito_iva - debito_iva)
+    ppm = neto_ventas * tasa_ppm
+    total_f29 = iva_neto + ppm + ret_honorarios
 
     return {
-        "periodo": periodo_actual,
-        "ventas_netas": ventas_netas,
-        "debito_fiscal": debito_fiscal,
-        "credito_fiscal": credito_fiscal,
+        "ventas_netas": neto_ventas,
+        "debito_fiscal": debito_iva,
+        "credito_fiscal": credito_iva,
         "iva_neto": iva_neto,
         "remanente": remanente,
-        "ppm": ppm_proyectado,
-        "retencion_honorarios": total_retencion,
-        "cantidad_bhe": cantidad_bhe,
-        "total_f29": total_f29
+        "ppm": ppm,
+        "retencion_honorarios": ret_honorarios,
+        "cantidad_bhe": cant_bhe,
+        "total_f29": total_f29,
+        "raw_ventas": raw_ventas,
+        "raw_compras": raw_compras,
+        "raw_bhe": raw_bhe
     }, None
 
-with st.spinner("Conectando con el SII y calculando liquidación F29..."):
-    datos, error = consultar_impuestos_sii(rut_secret, clave_secret, tasa_ppm)
+with st.spinner("Consultando Registro de Compras y Ventas en el SII..."):
+    datos, error = cargar_datos_f29(RUT, CLAVE, periodo_seleccionado, TASA_PPM)
 
 if error:
     st.error(error)
 else:
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Total F29 Estimado", f"${datos['total_f29']:,.0f}".replace(",", "."))
-    c2.metric("IVA Débito", f"${datos['debito_fiscal']:,.0f}".replace(",", "."))
-    c3.metric("IVA Crédito", f"${datos['credito_fiscal']:,.0f}".replace(",", "."))
-    c4.metric("PPM", f"${datos['ppm']:,.0f}".replace(",", "."))
-    c5.metric("Ret. Honorarios", f"${datos['retencion_honorarios']:,.0f}".replace(",", "."))
+    # Tarjetas KPI
+    kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
+    kpi1.metric("Total F29 Estimado", f"${datos['total_f29']:,.0f}".replace(",", "."))
+    kpi2.metric("IVA Débito (+)", f"${datos['debito_fiscal']:,.0f}".replace(",", "."))
+    kpi3.metric("IVA Crédito (-)", f"${datos['credito_fiscal']:,.0f}".replace(",", "."))
+    kpi4.metric(f"PPM ({TASA_PPM*100:.2f}%)", f"${datos['ppm']:,.0f}".replace(",", "."))
+    kpi5.metric("Ret. Honorarios", f"${datos['retencion_honorarios']:,.0f}".replace(",", "."))
 
     st.divider()
 
-    st.subheader("📋 Resumen de la Provisión")
-    detalle = [
-        {"Línea": "Ventas Netas del Mes", "Monto": f"${datos['ventas_netas']:,.0f}".replace(",", ".")},
-        {"Línea": "IVA Débito Fiscal (+)", "Monto": f"${datos['debito_fiscal']:,.0f}".replace(",", ".")},
-        {"Línea": "IVA Crédito Fiscal (-)", "Monto": f"${datos['credito_fiscal']:,.0f}".replace(",", ".")},
-        {"Línea": "IVA a Pagar (Cód. 89)", "Monto": f"${datos['iva_neto']:,.0f}".replace(",", ".")},
-        {"Línea": f"PPM Régimen ({tasa_ppm*100:.2f}%) (Cód. 62)", "Monto": f"${datos['ppm']:,.0f}".replace(",", ".")},
-        {"Línea": f"Retención Honorarios ({datos['cantidad_bhe']} docs) (Cód. 151)", "Monto": f"${datos['retencion_honorarios']:,.0f}".replace(",", ".")},
-        {"Línea": "TOTAL A PAGAR F29 (Cód. 91)", "Monto": f"${datos['total_f29']:,.0f}".replace(",", ".")}
-    ]
-    st.dataframe(pd.DataFrame(detalle), use_container_width=True, hide_index=True)
+    tab_resumen, tab_raw = st.tabs(["📊 Liquidación F29", "🔍 Diagnóstico Datos SII (Raw Data)"])
 
-if st.button("🔄 Actualizar Datos"):
+    with tab_resumen:
+        detalle = [
+            {"Concepto": "Ventas Netas (Base PPM)", "Monto": f"${datos['ventas_netas']:,.0f}".replace(",", ".")},
+            {"Concepto": "IVA Débito Fiscal (+)", "Monto": f"${datos['debito_fiscal']:,.0f}".replace(",", ".")},
+            {"Concepto": "IVA Crédito Fiscal (-)", "Monto": f"${datos['credito_fiscal']:,.0f}".replace(",", ".")},
+            {"Concepto": "IVA Determinado a Pagar", "Monto": f"${datos['iva_neto']:,.0f}".replace(",", ".")},
+            {"Concepto": "Remanente Crédito próx. mes", "Monto": f"${datos['remanente']:,.0f}".replace(",", ".")},
+            {"Concepto": f"PPM Proyectado ({TASA_PPM*100:.2f}%)", "Monto": f"${datos['ppm']:,.0f}".replace(",", ".")},
+            {"Concepto": f"Retención Honorarios ({datos['cantidad_bhe']} docs)", "Monto": f"${datos['retencion_honorarios']:,.0f}".replace(",", ".")},
+            {"Concepto": "TOTAL A PAGAR F29", "Monto": f"${datos['total_f29']:,.0f}".replace(",", ".")}
+        ]
+        st.dataframe(pd.DataFrame(detalle), use_container_width=True, hide_index=True)
+
+    with tab_raw:
+        st.write("Si los montos salen en 0, revisa si el SII devolvió registros en estas listas:")
+        c_v, c_c = st.columns(2)
+        with c_v:
+            st.markdown("**Respuesta RCV Ventas:**")
+            st.json(datos["raw_ventas"] if datos["raw_ventas"] else {"estado": "Lista vacía o sin ventas en este periodo"})
+        with c_c:
+            st.markdown("**Respuesta RCV Compras:**")
+            st.json(datos["raw_compras"] if datos["raw_compras"] else {"estado": "Lista vacía o sin compras en este periodo"})
+
+if st.button("🔄 Actualizar Ahora"):
     st.cache_data.clear()
     st.rerun()
